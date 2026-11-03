@@ -1,11 +1,11 @@
 {
   "name": "flashhead",
   "short_display_name": "Avatar FlashHead",
-  "version": "1.4.0",
+  "version": "1.5.0",
   "min_core_version": "2.15.3",
-  "description": "Live talking face — SoulX-FlashHead lip-syncs her persona avatar to her streaming voice, on the GPU in its own conda env",
+  "description": "Live talking face \u2014 SoulX-FlashHead lip-syncs her persona avatar to her streaming voice, on the GPU in its own conda env",
   "author": "Teri and Chris",
-  "icon": "🗣️",
+  "icon": "\ud83d\udde3\ufe0f",
   "priority": 50,
   "default_enabled": false,
   "privacy_aware": true,
@@ -19,8 +19,12 @@
   "settingsUI": "plugin",
   "extra": {
     "label": "Webcam packages",
-    "pip": ["pyvirtualcam>=0.12"],
-    "modules": ["pyvirtualcam"],
+    "pip": [
+      "pyvirtualcam>=0.12"
+    ],
+    "modules": [
+      "pyvirtualcam"
+    ],
     "note": "pyvirtualcam: her face as a webcam (Settings > FlashHead > Webcam)"
   },
   "environment": {
@@ -127,17 +131,38 @@
     ],
     "sidebar_accordion": {
       "title": "FlashHead",
-      "icon": "🗣️",
+      "icon": "\ud83d\udde3\ufe0f",
       "content": "sidebar.html",
       "script": "sidebar.js"
     },
     "app": {
       "label": "FlashHead",
-      "icon": "🗣️",
+      "icon": "\ud83d\udde3\ufe0f",
       "description": "Her live talking face, full size",
       "nav": "chat"
     },
     "settings": [
+      {
+        "key": "memory",
+        "type": "string",
+        "label": "Video memory",
+        "default": "full",
+        "options": [
+          {
+            "label": "Full: 512 px, 16-bit weights, about 6 GB",
+            "value": "full"
+          },
+          {
+            "label": "Lean: 384 px, 8-bit weights, about 4 GB",
+            "value": "lean"
+          },
+          {
+            "label": "Smallest: 384 px, 4-bit weights, about 3 GB",
+            "value": "smallest"
+          }
+        ],
+        "help": "How much of the GPU her face takes, measured on an RTX 5090 with her voice running. Full is her sharpest. Lean is a touch softer at half the memory, and renders faster. Smallest fits a card with 4 GB free. Nothing downloads again: the same models load leaner (the first start of a leaner preset compiles for a minute or two; later starts are as quick as Full). On Windows a card that runs out of video memory pages to system RAM silently and her face crawls; the panel says so after warm-up. Saving restarts the service."
+      },
       {
         "key": "idle",
         "type": "string",
@@ -177,6 +202,13 @@
         "help": "Sapphire ESP32 satellites with a screen (the Waveshare board on satellite firmware 0.7.7+) show her face: while she talks, or always (her idle loop at 2 fps between replies). A board stays a speaker first; nothing else on it changes."
       },
       {
+        "key": "face_px",
+        "type": "number",
+        "label": "Her face's size on a screen (px)",
+        "default": 0,
+        "help": "0: the screen's own square (240 on the pendant). Smaller is faster: a board's decode, paint and repaint all scale with pixels; 176 leaves its corners and clock clear. Multiples of 16."
+      },
+      {
         "key": "persona",
         "type": "string",
         "label": "Persona face",
@@ -198,7 +230,9 @@
         "label": "Her voice as a mic",
         "default": false,
         "tab": "Webcam",
-        "show_if": {"camera": true},
+        "show_if": {
+          "camera": true
+        },
         "help": "Her voice goes to the call with her face, in step. Windows: needs VB-Cable (free, vb-audio.com/Cable); pick CABLE Output as the mic in the call. Linux: a mic called Sapphire Voice appears. While on, her voice plays nowhere else unless you also turn on Hear her here."
       },
       {
@@ -207,7 +241,9 @@
         "label": "Hear her here too",
         "default": true,
         "tab": "Webcam",
-        "show_if": {"camera_voice": true},
+        "show_if": {
+          "camera_voice": true
+        },
         "help": "Her voice on this computer's speakers as well as in the call."
       },
       {
@@ -216,7 +252,9 @@
         "label": "Camera device",
         "default": "",
         "tab": "Webcam",
-        "show_if": {"camera": true},
+        "show_if": {
+          "camera": true
+        },
         "placeholder": "the first free one",
         "help": "Linux: a v4l2loopback device such as /dev/video3. Windows: leave empty."
       },
@@ -226,7 +264,9 @@
         "label": "Mic device",
         "default": "",
         "tab": "Webcam",
-        "show_if": {"camera_voice": true},
+        "show_if": {
+          "camera_voice": true
+        },
         "placeholder": "CABLE Input (Windows), Sapphire Voice (Linux)",
         "help": "An output device her voice is played into for the call (part of its name is enough). Empty: VB-Cable's CABLE Input on Windows, a PipeWire mic of her own on Linux."
       },
@@ -244,13 +284,17 @@
         "label": "Pairing string from the GPU computer",
         "default": "",
         "tab": "Advanced",
-        "show_if": {"client": true},
+        "show_if": {
+          "client": true
+        },
         "placeholder": "https://192.0.2.10:5018/#key=...&pin=...",
         "help": "Its pairing string: on that computer, Settings > FlashHead > Advanced, turn on Share this GPU, then Add a computer (or flashhead-server's add command). Her face here is sent there; her words go there and come back with her face."
       },
       {
         "key": "share",
-        "show_if": {"client": false},
+        "show_if": {
+          "client": false
+        },
         "type": "boolean",
         "label": "Share this GPU with other computers",
         "default": false,
@@ -259,7 +303,9 @@
       },
       {
         "key": "share_port",
-        "show_if": {"client": false},
+        "show_if": {
+          "client": false
+        },
         "type": "number",
         "label": "Share port",
         "default": 5018,

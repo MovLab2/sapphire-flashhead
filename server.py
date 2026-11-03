@@ -109,6 +109,14 @@ FACES = ROOT / "user" / "models" / "flashhead" / "faces"     # faces other compu
 DOOR = ROOT / "user" / "worker_door" / "flashhead"           # its cert and the keys of the computers let in
 FACES_KEPT = 16          # per session: her face and her moods
 _cfg = {"mtime": None, "idle": "loop"}
+PRESETS = {             # setting `memory`: what her face takes of the card (measured on a 5090, 2026-11-02:
+    "full": dict(size=512, bits=16, vae8=False, need=7.0),      # 6.1 GB held, 6.7x), need: GB free the preflight asks for
+    "lean": dict(size=384, bits=8, vae8=True, need=4.5),        # 3.65 GB, 8.1x
+    "smallest": dict(size=384, bits=4, vae8=True, need=3.5),    # 2.97 GB, 8.3x
+}
+PRESET_NAME = str(_START.get("memory") or "full") if str(_START.get("memory") or "full") in PRESETS else "full"
+PRESET = PRESETS[PRESET_NAME]
+MEASURED = ROOT / "user" / "flashhead" / "measured.json"    # what each preset took and ran at on this card
 
 
 class Session:
@@ -164,7 +172,9 @@ DONE = ".complete"       # written last: a folder without it is a fetch that did
 
 def _preflight():
     """Why this machine can't run Lite, in words, or None. Before any download."""
-    need = "needs an NVIDIA GPU (RTX 30-series or newer) with 7 GB of free video memory"
+    need = (f"needs an NVIDIA GPU (RTX 30-series or newer) with {PRESET['need']:g} GB of free video memory"
+            + (" for this Video memory preset" if PRESET_NAME != "full" else
+               " (Settings > FlashHead > Video memory has leaner presets)"))
     import torch
     if torch.version.hip:
         return f"FlashHead {need}: this is an AMD (ROCm) build"
@@ -177,8 +187,9 @@ def _preflight():
     name = torch.cuda.get_device_name(0)
     if major < 8:
         return f"FlashHead {need}: the {name} is compute {major}.{minor}"
-    free = torch.cuda.mem_get_info(0)[0] / 1e9
-    if free < 7:
+    free, total = (x / 1e9 for x in torch.cuda.mem_get_info(0))
+    _state["gpu"] = {"name": name, "total_gb": round(total, 1), "free_gb": round(free, 1), "preset": PRESET_NAME}
+    if free < PRESET["need"]:
         return f"FlashHead {need}: the {name} has {free:.1f} GB free right now"
     return None
 
@@ -278,7 +289,7 @@ def _stubs():
         return m
     for top, mods in (("xfuser", ("xfuser", "xfuser.core", "xfuser.core.distributed", "xfuser.core.long_ctx_attention")),
                       ("mediapipe", ("mediapipe",))):
-        if importlib.util.find_spec(top) is None:
+        if top not in sys.modules and importlib.util.find_spec(top) is None:   # find_spec throws on a stand-in already put in (bench)
             for name in mods:
                 sys.modules.setdefault(name, absent(name))
 
@@ -338,6 +349,9 @@ def _load():
         _stubs()
         from flash_head import inference as fh
         from flash_head.src.pipeline import flash_head_pipeline as fp
+        fh.infer_params["height"] = fh.infer_params["width"] = PRESET["size"]     # read whenever a face is set
+        import quant                      # leaner weights for a small card (setting `memory`); torch, so not at import
+        quant.hook_loads(PRESET["bits"], PRESET["vae8"], logger.info)
         if not _compile_ok():
             logger.warning("No Triton: running without torch.compile (slower)")
             fp.COMPILE_MODEL = fp.COMPILE_VAE = False
@@ -355,6 +369,8 @@ def _load():
         if _pipe is None:                     # out here, the failed load's model is freed before the second
             torch.cuda.empty_cache()
             _pipe = load()
+        _fp16()
+        _w2v16(fh)
         ip = fh.get_infer_params()
         # the model's window geometry, as in SoulX-FlashHead's generate_video.py stream mode (Apache-2.0)
         slice_len = ip["frame_num"] - ip["motion_frames_num"]
@@ -379,15 +395,27 @@ def _load():
         P["render_s"] = time.perf_counter() - t
         speed = P["chunk_s"] / P["render_s"]
         P["compiled"] = _compiled(fp)
-        if speed < 1.1:
+        g = _state["gpu"]
+        g.update(took_gb=round(g["free_gb"] - torch.cuda.mem_get_info(0)[0] / 1e9, 1), speed=round(speed, 1))
+        paging = torch.cuda.memory_reserved() / 1e9 > g["free_gb"] + 0.2    # Windows pages to system RAM instead of failing
+        leaner = " A leaner Video memory preset (Settings > FlashHead) takes less and renders faster." if PRESET_NAME != "smallest" else ""
+        if paging:
+            _state["warning"] = (f"The {g['name']} ran out of video memory ({g['free_gb']} GB was free) and is paging to "
+                                 f"system RAM: her face will crawl.{leaner}")
+            logger.warning(_state["warning"])
+        elif speed < 1.1:
             _state["warning"] = (f"This GPU renders {speed:.1f}x real time: her face may fall behind her voice. "
                                  "Other work on the GPU (a local LLM, a game) slows her too."
                                  + {"no": " It runs without torch.compile (see its log), ~20% slower.",
-                                    "partly": " Parts of it run without torch.compile (see its log)."}.get(P["compiled"], ""))
+                                    "partly": " Parts of it run without torch.compile (see its log)."}.get(P["compiled"], "")
+                                 + leaner)
             logger.warning(_state["warning"])
+        _record(g)
         _state["status"] = "ready"
-        logger.info(f"Ready: {P['n16']} samples -> {P['n16'] * P['fps'] // P['sr']} frames per chunk, "
-                    f"{speed:.1f}x real time, torch.compile: {P['compiled']}")
+        logger.info(f"Ready: {P['n16']} samples -> {P['n16'] * P['fps'] // P['sr']} frames per chunk at {PRESET['size']} px, "
+                    f"{speed:.1f}x real time, torch.compile: {P['compiled']}; {g['name']}, {g['total_gb']} GB, "
+                    f"{g['free_gb']} GB free at start, her face takes {g['took_gb']} GB "
+                    f"(Video memory: {PRESET_NAME}, {PRESET['bits']}-bit weights, fp16 sums)")
     except Exception as e:
         logger.exception("Load failed")
         _state.update(status="error", error=str(e))
@@ -404,6 +432,64 @@ def _compiled(fp):
     if ok < total:
         logger.warning(f"torch.compile failed for {total - ok} of {total} parts: those run uncompiled (the reason is above)")
     return "yes" if ok == total else "partly" if ok else "no"
+
+
+def _record(g):
+    """What this preset took of the card and ran at, kept per preset for the settings page
+    (its line under Video memory). Entries from another card are dropped."""
+    try:
+        kept = json.loads(MEASURED.read_text(encoding="utf-8")) if MEASURED.exists() else {}
+    except (OSError, ValueError):
+        kept = {}
+    kept = {k: v for k, v in kept.items() if isinstance(v, dict) and v.get("gpu") == g["name"]}
+    kept[PRESET_NAME] = {"gpu": g["name"], "took_gb": g["took_gb"], "speed": g["speed"],
+                         "size": PRESET["size"], "bits": PRESET["bits"], "at": int(time.time())}
+    try:
+        MEASURED.parent.mkdir(parents=True, exist_ok=True)
+        MEASURED.write_text(json.dumps(kept, indent=1), encoding="utf-8")
+    except OSError as e:
+        logger.warning(f"{MEASURED.name} not written: {e}")
+    _state["measured"] = kept
+
+
+def _fp16():
+    """The DiT in fp16 with fp16 matmul sums: 17% faster on RTX 40/50 (bench fp16acc), her face
+    the same over 3-minute runs; the VAE stays bf16, cast at its edges. An overflow shows as
+    NaN frames: _render watches for them and goes back to bf16, once, for good."""
+    import torch
+    torch.backends.cuda.matmul.allow_fp16_accumulation = True
+    _pipe.model.half()
+    _pipe.param_dtype = torch.float16
+    dec, enc, bf = _pipe.vae.decode, _pipe.vae.encode, torch.bfloat16
+    _pipe.vae.decode = lambda z, *a, **k: dec(z.to(bf), *a, **k)
+    _pipe.vae.encode = lambda x, *a, **k: enc(x.to(bf), *a, **k).to(_pipe.param_dtype)
+    P["fp16"] = True
+
+
+def _fp16_off():
+    """fp16 overflowed for some face: bf16 from here on, every session's tensors with it."""
+    import torch
+    logger.warning("fp16 overflowed (NaN frames): the model goes on in bf16, a little slower")
+    torch.backends.cuda.matmul.allow_fp16_accumulation = False
+    _pipe.model.to(torch.bfloat16)
+    _pipe.param_dtype = torch.bfloat16
+    P["fp16"] = False
+    with _viewers_lock:
+        for s in _sessions.values():
+            if s.t:
+                s.t = tuple(t.to(torch.bfloat16) for t in s.t)
+
+
+def _w2v16(fh):
+    """The audio encoder in bf16 (it loads in fp32): 0.2 GB less, 5 -> 3.5 ms a chunk."""
+    import torch
+    _pipe.audio_encoder.to(torch.bfloat16)
+    real = fh.get_audio_embedding
+
+    def emb(*a, **k):
+        with torch.autocast("cuda", dtype=torch.bfloat16):
+            return real(*a, **k)
+    fh.get_audio_embedding = emb
 
 
 def _apply_face(s):
@@ -513,6 +599,10 @@ def _render(s, a16):
         emb = fh.get_audio_embedding(_pipe, s.dq, P["start"], P["end"])
         with contextlib.redirect_stdout(io.StringIO()):   # per-step timing prints
             video = fh.run_pipeline(_pipe, emb)
+            if P.get("fp16") and not video.isfinite().all():
+                _fp16_off()                               # this chunk again in bf16, from the motion it started with
+                _pipe.original_color_reference, _pipe.ref_img_latent, _pipe.latent_motion_frames = s.t
+                video = fh.run_pipeline(_pipe, emb)
         s.t = (s.t[0], s.t[1], _pipe.latent_motion_frames)
         return video[P["motion"]:].byte().cpu().numpy()   # the engine gives 0-255 floats: trimmed and cast on the GPU, a fifth of the copy
 

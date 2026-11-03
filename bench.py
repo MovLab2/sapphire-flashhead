@@ -13,14 +13,22 @@ own process (compiling is per process), warms up, then times real chunks:
 0.96 s of speech in, 24 frames out, as the server's own _render and _pack.
 
 Variants (the env decides what can run; one it can't is said and skipped):
-  eager       no torch.compile
-  compiled    torch.compile as shipped
+  full, lean, smallest   the server's own Video memory presets (plugin.json), the way users get them
+  eager       the full preset without torch.compile
+  compiled    the full preset (torch.compile as shipped)
   sdpa        compiled, attention forced to PyTorch's own (if the env has a faster one)
   autotune    compiled with mode="max-autotune" (long warm-up)
-  steps2      compiled, 2 sampling steps instead of 4: faster, maybe softer (look at its strip)
-  fp16acc     compiled, the model in fp16 with fp16 matmul sums: faster on RTX 40/50, maybe noisier
-  decode25    compiled, decodes only the frames kept (25 of 33): maybe seams at chunk starts
+  decode25    compiled, decodes only the frames kept (25 of 33): rougher joins between chunks (seam 1.27 -> 1.56)
+  res384      compiled at 384 px square instead of 512: fewer tokens and pixels everywhere, a touch softer
+  int8        compiled, the DiT's Linear weights int8 after the load (quant.py): ~1.4 GB less video memory
+  int4        compiled, the DiT's big layers 4-bit, the rest int8: ~2 GB less
+  vae8        compiled, the VAE's convolutions int8: ~0.4 GB less
+Tried and dead (2026-11-02, don't repeat): 256 px melts to a grey mask by 3 minutes; 2 and 3 sampling steps
+smear; CUDA graphs (reduce-overhead) drift and hold more memory. fp16 sums and the bf16 audio encoder
+are part of every preset now (the server does them), so there is no variant for them.
 Each variant also saves a strip of frames of her speaking: quality is for eyes, not timers.
+Every variant reports video memory: the peak while rendering, the peak overall (warm-up, the face taken),
+and what the process holds as nvidia-smi sees it (what a Windows card pages out when it is more than it has).
 Results print as a table and are saved to user/models/flashhead/bench/<time>.json, strips beside.
 """
 import json
@@ -33,15 +41,20 @@ from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
 VARIANTS = {
+    "full": {"BENCH_PRESET": "full"},
+    "lean": {"BENCH_PRESET": "lean"},
+    "smallest": {"BENCH_PRESET": "smallest"},
     "eager": {"FLASHHEAD_COMPILE": "0"},
     "compiled": {},
     "sdpa": {"BENCH_ATTN": "sdpa"},
     "autotune": {"BENCH_COMPILE_MODE": "max-autotune"},
-    "steps2": {"BENCH_STEPS": "2"},
-    "fp16acc": {"BENCH_FP16": "1"},
     "decode25": {"BENCH_DECODE25": "1"},
+    "res384": {"BENCH_RES": "384"},
+    "int8": {"BENCH_INT8": "1"},
+    "int4": {"BENCH_INT4": "1"},
+    "vae8": {"BENCH_VAE8": "1"},
 }
-DEFAULT = ["eager", "compiled", "sdpa"]
+DEFAULT = ["full", "lean", "smallest"]
 
 
 def _root():
@@ -78,6 +91,8 @@ def child(chunks, face, audio, long_s=0):
         out["error"] = f"no models in {server.MODELS} (run the server once first: it downloads them)"
         print("BENCH " + json.dumps(out))
         return
+    if os.environ.get("BENCH_RES"):                     # the server sizes her from its preset before the warm-up
+        server.PRESET = dict(server.PRESET, size=int(os.environ["BENCH_RES"]))
     if os.environ.get("BENCH_ATTN") == "sdpa":
         sys.path.insert(0, str(server.ENGINE))
         os.chdir(server.ENGINE)
@@ -96,23 +111,25 @@ def child(chunks, face, audio, long_s=0):
         print("BENCH " + json.dumps(out))
         return
     out["load_s"] = round(time.perf_counter() - t, 1)    # includes the server's own two warm-up chunks
+    out["vram_load_gb"] = round(torch.cuda.max_memory_allocated() / 1e9, 2)
 
     fh, P = server.P["fh"], server.P
     from flash_head.src.modules import flash_head_model as fm
-    if os.environ.get("BENCH_STEPS"):
-        fh.infer_params["sample_steps"] = int(os.environ["BENCH_STEPS"])   # read again when the face is set
-    if os.environ.get("BENCH_FP16"):                    # the model in fp16; the VAE stays bf16, cast at its edges
-        torch.backends.cuda.matmul.allow_fp16_accumulation = True
-        pipe, bf = server._pipe, torch.bfloat16
-        pipe.model.half()
-        pipe.param_dtype = torch.float16
-        dec, enc = pipe.vae.decode, pipe.vae.encode
-        pipe.vae.decode = lambda z, *a, **k: dec(z.to(bf), *a, **k)
-        pipe.vae.encode = lambda x, *a, **k: enc(x.to(bf), *a, **k).half()
     if os.environ.get("BENCH_DECODE25"):
         real = server._pipe.vae.decode
         server._pipe.vae.decode = lambda z, *a, **k: real(z[:, 1:], *a, **k)   # latents 1..4 -> 25 frames
         P["motion"] = 1                                                      # of which the last 24 are new
+    if os.environ.get("BENCH_INT8") or os.environ.get("BENCH_INT4") or os.environ.get("BENCH_VAE8"):
+        import quant                                    # after the load here; the server shrinks on the CPU before it
+        dit = getattr(server._pipe.model, "_orig_mod", server._pipe.model)
+        if os.environ.get("BENCH_INT8"):
+            out["int8_layers"] = quant.dit(dit, 8)[1]
+        if os.environ.get("BENCH_INT4"):
+            out["int4_layers"], out["int8_layers"] = quant.dit(dit, 4)
+        if os.environ.get("BENCH_VAE8"):
+            out["vae8_layers"] = quant.vae(server._pipe.vae.model)
+        torch._dynamo.reset()                           # compiled again, with the new weights
+        torch.cuda.empty_cache()
     out["compiled"] = P.get("compiled")
     out["attention"] = ("sage" if fm.SAGE_ATTN_AVAILABLE else "flash3" if fm.FLASH_ATTN_3_AVAILABLE
                         else "flash2" if fm.FLASH_ATTN_2_AVAILABLE else "sdpa")
@@ -134,14 +151,13 @@ def child(chunks, face, audio, long_s=0):
     s = server.Session("bench")
     s.want = face or str(server.Path(server.tempfile.gettempdir()) / "flashhead_warmup.png")   # else the server's own warm-up card
     server._apply_face(s)
-    if os.environ.get("BENCH_FP16"):
-        s.t = (s.t[0], s.t[1].half(), s.t[2].half())
     speech = (np.sin(np.arange(P["n16"]) * 2 * np.pi * 180 / P["sr"]) * 0.3).astype(np.float32)
     a24 = np.zeros(P["n24"], np.int16)
     for _ in range(3):
         server._render(s, speech)
     for v in stage.values():
         v.clear()
+    peak = torch.cuda.max_memory_allocated()             # through the load, warm-up, the face taken and three renders
     torch.cuda.reset_peak_memory_stats()
     render, pack = [], []
     for _ in range(chunks):
@@ -157,11 +173,29 @@ def child(chunks, face, audio, long_s=0):
                embed=med(stage["embed"]), model=med(stage["model"]),
                worst=round(float(max(render)), 4),
                realtime=round(P["chunk_s"] / whole, 2),
-               vram_gb=round(torch.cuda.max_memory_allocated() / 1e9, 2))
+               vram_gb=round(torch.cuda.max_memory_allocated() / 1e9, 2),
+               vram_peak_gb=round(max(peak, torch.cuda.max_memory_allocated()) / 1e9, 2),
+               vram_reserved_gb=round(torch.cuda.memory_reserved() / 1e9, 2),
+               vram_held_gb=_held())
     out["strip"] = _strip(server, s, audio)
     if long_s:
         out["long"] = _long(server, s, audio, long_s)
     print("BENCH " + json.dumps(out))
+
+
+def _held():
+    """GB this process holds on the GPU as nvidia-smi sees it: weights, activations and the
+    allocator's cache together. None when nvidia-smi won't say (some Windows drivers)."""
+    try:
+        r = subprocess.run(["nvidia-smi", "--query-compute-apps=pid,used_memory", "--format=csv,noheader,nounits"],
+                           capture_output=True, text=True, timeout=10)
+        for line in r.stdout.splitlines():
+            pid, mem = (x.strip() for x in line.split(",")[:2])
+            if pid.isdigit() and int(pid) == os.getpid() and mem.isdigit():
+                return round(int(mem) / 1024, 2)
+    except Exception:
+        pass
+    return None
 
 
 def _strip(server, s, audio):
@@ -263,9 +297,12 @@ def main(argv):
     results = []
     for n in names:
         print(f"\n{n}: loading and warming up (compiled ones take a minute or more)...", flush=True)
+        settings = _settings(root)
+        if "BENCH_PRESET" in VARIANTS[n]:               # the server applies its own preset: size, weights, the preflight
+            settings["memory"] = VARIANTS[n]["BENCH_PRESET"]
         env = {**os.environ, "SAPPHIRE_ROOT": str(root), "BENCH_VARIANT": n, "PYTHONUTF8": "1",
                "BENCH_OUT": str(folder / stamp),
-               "SAPPHIRE_PLUGIN_SETTINGS": json.dumps(_settings(root)), **VARIANTS[n]}
+               "SAPPHIRE_PLUGIN_SETTINGS": json.dumps(settings), **VARIANTS[n]}
         p = subprocess.run([sys.executable, str(Path(__file__).resolve()), "--child", str(chunks),
                             opts["--face"], opts["--audio"], opts["--long"]],
                            env=env, capture_output=True, text=True, encoding="utf-8", errors="replace")
@@ -279,12 +316,17 @@ def main(argv):
 
     ok = [r for r in results if not r.get("error")]
     if ok:
-        print(f"\n{'variant':10} {'real time':>9} {'per chunk':>9} {'model':>7} {'audio':>7} {'jpegs*':>7} {'worst':>7} {'seam':>5} {'load':>6}")
+        print(f"\n{'variant':10} {'real time':>9} {'per chunk':>9} {'model':>7} {'audio':>7} {'jpegs*':>7} {'worst':>7} {'seam':>5} {'load':>6}"
+              f" {'vram':>5} {'peak':>5} {'held':>5}")
         for r in ok:
+            held = r.get("vram_held_gb")
             print(f"{r['variant']:10} {r['realtime']:>8}x {r['whole']:>9} {r['model']:>7} {r['embed']:>7} "
-                  f"{r['pack']:>7} {r['worst']:>7} {r['strip']['seam']:>5} {r['load_s']:>5}s")
+                  f"{r['pack']:>7} {r['worst']:>7} {r['strip']['seam']:>5} {r['load_s']:>5}s"
+                  f" {r['vram_gb']:>5} {r.get('vram_peak_gb', r['vram_gb']):>5} {('-' if held is None else held):>5}")
         print("* JPEGs are made beside the next render, so they don't count in the pace. "
-              "seam: picture jump between chunks / within one (1.0 = smooth).")
+              "seam: picture jump between chunks / within one (1.0 = smooth). "
+              "vram: GB at peak while rendering; peak: the most ever allocated (warm-up, the face taken); "
+              "held: what nvidia-smi shows for the process.")
         for r in ok:
             if r.get("long"):
                 L = r["long"]

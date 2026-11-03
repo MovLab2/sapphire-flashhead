@@ -240,7 +240,8 @@ export function mount(root, { big = false } = {}) {
             status.textContent = stuck ? (s.error || s.status)       // the reason, in words, alone
                 : !s.face_source ? 'No face yet: give her persona an avatar, or upload one in ⚙ › Faces'
                 : s.note || s.warning
-                || `${s.status} · face: ${s.face_source}${mood} · viewers: ${s.viewers ?? 0}`;
+                || `${s.status} · face: ${s.face_source}${mood} · viewers: ${s.viewers ?? 0}`
+                   + (s.gpu?.speed ? ` · ${s.gpu.speed}x real time, ${s.gpu.took_gb} GB` : '');
             const key = `${s.face_source}|${s.mood}|${s.face_changed || ''}`;
             if (key !== faceKey) {                     // a face changed in Settings: the still follows
                 faceKey = key;

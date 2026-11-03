@@ -100,6 +100,29 @@ function mountFaces(el) {
     refresh();
 }
 
+// Under the Video memory setting: this card, and what each preset tried on it took
+// and ran at (the server measures both at every start: its warm-up is the benchmark).
+// Polled, so a saved preset shows "warming up" and then its numbers without a reload.
+const PRESETS = [['full', 'Full'], ['lean', 'Lean'], ['smallest', 'Smallest']];
+
+function mountMeasure(el) {
+    el.innerHTML = `<div class="fh-measure" style="font-size:var(--font-sm,12px);color:var(--text-muted);margin-top:2px;"></div>`;
+    const line = el.querySelector('.fh-measure');
+    async function tick() {
+        if (!el.isConnected) return clearInterval(poll);
+        try {
+            const s = await (await fetch(`${BASE}/status`)).json();
+            const g = s.gpu, m = s.measured || {};
+            if (!g) line.textContent = s.status === 'offline' ? (s.error || 'service not running') : (s.status || '');
+            else if (s.status !== 'ready') line.textContent = `${g.name}: ${s.status}…`;
+            else line.textContent = `${g.name}, ${g.total_gb} GB · ` + PRESETS.map(([k, name]) =>
+                m[k] ? `${name}: ${m[k].took_gb} GB, ${m[k].speed}x real time` : `${name}: not tried yet`).join(' · ');
+        } catch { line.textContent = ''; }
+    }
+    const poll = setInterval(tick, 3000);
+    tick();
+}
+
 // Advanced: where her models live (to back up or move), and with sharing on,
 // which computers may use this GPU (core's worker-door panel).
 async function mountAdvanced(el, share) {
@@ -116,13 +139,20 @@ async function mountModels(el) {
     el.innerHTML = `<div style="margin-top:6px;">
         <div style="font-weight:600;margin-bottom:4px;">Where her models live now</div>
         <code class="fh-folder" style="display:block;word-break:break-all;padding:6px 8px;border-radius:6px;background:var(--bg-tertiary,rgba(127,127,127,.12));"></code>
-        <div class="fh-parts" style="color:var(--text-muted);font-size:var(--font-sm,12px);margin-top:6px;"></div></div>`;
+        <div class="fh-parts" style="color:var(--text-muted);font-size:var(--font-sm,12px);margin-top:6px;"></div>
+        <div class="fh-gpu" style="color:var(--text-muted);font-size:var(--font-sm,12px);margin-top:6px;"></div></div>`;
     try {
         const m = await (await fetch(`${BASE}/models`)).json();
         el.querySelector('.fh-folder').textContent = m.folder;
         el.querySelector('.fh-parts').textContent = m.parts
             .map(p => `${p.name}: ${p.present ? `${p.gb} GB` : 'not there yet (downloads on start)'}`).join(' · ');
     } catch { el.querySelector('.fh-folder').textContent = 'unknown'; }
+    try {                                   // what her face takes of this card, as the server measured it at start
+        const g = (await (await fetch(`${BASE}/status`)).json()).gpu;
+        if (g) el.querySelector('.fh-gpu').textContent = `This GPU: ${g.name}, ${g.total_gb} GB`
+            + (g.took_gb != null ? `; her face takes ${g.took_gb} GB (Video memory: ${g.preset}), ${g.speed}x real time`
+                                 : ` (${g.free_gb} GB free when the service started)`);
+    } catch {}
 }
 
 // Webcam: what her camera is doing now, in words, and the packages it needs.
@@ -155,7 +185,7 @@ function mountWebcam(el) {
     tick();
 }
 
-const RESTARTS = ['port', 'models_dir', 'install_test', 'share', 'share_port'];      // read once at service start: a change restarts it
+const RESTARTS = ['memory', 'port', 'models_dir', 'install_test', 'share', 'share_port'];      // read once at service start: a change restarts it
 
 export default {
     name: 'flashhead',
@@ -174,7 +204,8 @@ export default {
             },
             render: (container, settings) =>
                 renderSettingsForm(container, fields, settings,
-                    { slots: [{ tab: 'Faces', mount: mountFaces }, { tab: 'Webcam', mount: mountWebcam },
+                    { slots: [{ tab: 'General', mount: mountMeasure },
+                             { tab: 'Faces', mount: mountFaces }, { tab: 'Webcam', mount: mountWebcam },
                              { tab: 'Advanced', mount: el => mountAdvanced(el, saved.share === true) }] }),
             async save(s) {
                 const out = await pluginsAPI.saveSettings('flashhead', s);

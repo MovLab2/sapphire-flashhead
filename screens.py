@@ -7,6 +7,7 @@ a gentle rate). One pusher per board keeps only the newest frame, so a slow
 board drops frames instead of falling behind. A board stays a speaker first:
 nothing is sent to one that does not say `screen.jpeg` in its /health.
 """
+import collections
 import io
 import logging
 import threading
@@ -16,7 +17,7 @@ from plugins.flashhead import faces
 
 logger = logging.getLogger(__name__)
 
-TALK_FPS, IDLE_FPS = 8, 2       # of the server's 25
+TALK_FPS, IDLE_FPS = 12, 12     # EXPERIMENT: idle at 12 for the size sweep (2026-11-02); the kept idle is 2
 HOLD_S = 4                      # talking: stay on this long after her last word
 AHEAD_S = 0.15                  # the browser starts a packet's sound this far after it lands
 
@@ -57,11 +58,59 @@ def _mode():
     return faces.settings().get("screens") or "talking"
 
 
+class _Playout:
+    """Frames due on one clock, given to every board's pusher when their time comes. The
+    reader thread puts, this one sleeps: neither holds the other up. Behind by a frame or
+    more, it skips to the newest frame that is due (steady over eager), and the queue never
+    holds more than two seconds ahead of now, so the lag stays bounded."""
+
+    def __init__(self, pushers):
+        self.pushers = pushers
+        self.items = collections.deque()
+        self.cv = threading.Condition()
+        self.alive = True
+        self.thread = threading.Thread(target=self._run, daemon=True, name="flashhead-playout")
+        self.thread.start()
+
+    def put(self, due, frame):
+        with self.cv:
+            while self.items and due - time.monotonic() > 2.0:
+                self.items.popleft()
+            self.items.append((due, frame))
+            self.cv.notify()
+
+    def close(self):
+        with self.cv:
+            self.alive = False
+            self.items.clear()
+            self.cv.notify()
+
+    def _run(self):
+        while True:
+            with self.cv:
+                while self.alive and not self.items:
+                    self.cv.wait()
+                if not self.alive:
+                    return
+                wait = self.items[0][0] - time.monotonic()
+                if wait > 0:
+                    self.cv.wait(wait)                      # a put meanwhile is looked at again
+                    continue
+                due, frame = self.items.popleft()
+                while self.items and self.items[0][0] <= time.monotonic():
+                    due, frame = self.items.popleft()      # behind: the newest due frame wins
+            for p in self.pushers:
+                p.give(frame)
+
+
 class _Pusher:
     """One board: the newest frame wins, sent one at a time."""
 
     def __init__(self, board):
         self.id, self.side = board
+        want = int(faces.settings().get("face_px") or 0)          # a smaller face than the glass's square: every link of the board's chain scales with pixels
+        if 64 <= want < self.side:
+            self.side = want // 16 * 16
         self.frame, self.lock, self.ready = None, threading.Lock(), threading.Event()
         self.fails = 0
         threading.Thread(target=self._run, daemon=True, name=f"flashhead-{self.id}").start()
@@ -126,6 +175,13 @@ def _watch(boards, mode):
     import json
     import struct
     pushers = [_Pusher(b) for b in boards]
+    playout = _Playout(pushers)
+    clock = None
+    try:
+        from core.devices import glass
+        talk_fps = max(1, min(TALK_FPS, min(glass.takes(b[0])["fps"] for b in boards)))   # the slowest board's beat, 1:1: no frame doubled or skipped
+    except Exception:
+        talk_fps = TALK_FPS
     last_word, checked = time.monotonic(), time.monotonic()
     try:
         with faces.http().get(f"{faces.base_url()}/stream?audio=0", stream=True, timeout=(5, 30)) as r:
@@ -163,20 +219,26 @@ def _watch(boards, mode):
                     _wake.clear()                    # the reply that woke us is here
                 elif mode == "talking":
                     continue                     # between her lines the last frame holds
-                fps = TALK_FPS if head["kind"] == "speech" else IDLE_FPS
+                fps = talk_fps if head["kind"] == "speech" else IDLE_FPS
                 step = max(1, round(head["fps"] / fps))
                 at = head["audio"]
                 frames = []
                 for n in head["frames"]:
                     frames.append(body[at:at + n])
                     at += n
+                # One clock across packets: a packet's frames are due where the last packet left
+                # off, not at its own arrival plus AHEAD_S. That restarted the clock every packet,
+                # and the playout, done here in the reading thread, took longer than a packet: a
+                # hitch every second and a lag that grew through a reply. The reader never sleeps
+                # now; `playout` gives the frames when they are due (2026-11-02).
+                if clock is None or now > clock + 0.5:
+                    clock = now + AHEAD_S                       # a fresh start
                 for i in range(0, len(frames), step):
-                    due = now + AHEAD_S + i / head["fps"]
-                    time.sleep(max(0, due - time.monotonic()))
-                    for p in pushers:
-                        p.give(frames[i])
+                    playout.put(clock + i / head["fps"], frames[i])
+                clock += len(frames) / head["fps"]
     finally:
         _connected.clear()
+        playout.close()
         for p in pushers:
             p.close()
         logger.info("[flashhead] her screens rest")

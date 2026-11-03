@@ -8,7 +8,7 @@ A loader: this plugin ships only its own code. The engine and the weights are fe
 
 ## Requirements
 
-- **NVIDIA GPU, compute 8.0+** with **~7 GB of free VRAM** and a **driver 570 or newer** (CUDA 12.8). Tested on an RTX 5090 (5x real time, compiled). An RTX 5060 Ti renders about 1.2x compiled, so it keeps up with little to spare; slower cards may not keep up live, and the panel says so after warm-up. CPU, AMD (ROCm) and macOS are not supported.
+- **NVIDIA GPU, compute 8.0+** with **~6 GB of free VRAM**, or about 4 GB or 3 GB with the leaner **Video memory** presets (Settings › FlashHead), and a **driver 570 or newer** (CUDA 12.8). Tested on an RTX 5090: 6.7x real time at Full, 8.1x at Lean and 8.3x at Smallest, which render at 384 px. An RTX 5060 Ti renders about 1.4x at Full and keeps up better leaner; slower cards may not keep up live, and the panel says so after warm-up. **Windows:** a card that runs out of video memory pages to system RAM silently and her face crawls at a tenth of real time; the panel and the log say so at Ready, and a leaner preset fixes it. CPU, AMD (ROCm) and macOS are not supported.
 - **~13 GB of disk**: the conda env (~5 GB) and the models (~7.7 GB).
 - **Streaming TTS** (Kokoro or Piper).
 - **Sapphire 2.15.3 or newer** (`min_core_version`).
@@ -75,9 +75,9 @@ While the webcam is on, her face renders all the time: cheap with the calm loop,
 
 ## How fast is this GPU?
 
-`./flashhead-bench.sh` or `flashhead-bench.bat` (in the env that renders; inside Sapphire set `FLASHHEAD_ENV=sapphire-plugin-flashhead`) loads the model the way the server does, once per variant, and times real chunks: 0.96 s of speech in, 24 frames out. Variants: `eager`, `compiled`, `sdpa`, `autotune`, and the experiments `steps2`, `fp16acc`, `decode25`. `--face` and `--audio` give a picture and a recording for a strip of frames per variant (quality is for eyes, not timers); `--long 180` lets her run on for 3 minutes and reports whether her face drifts. Results land in `user/models/flashhead/bench/`. It never downloads; run the server once first.
+`./flashhead-bench.sh` or `flashhead-bench.bat` (in the env that renders; inside Sapphire set `FLASHHEAD_ENV=sapphire-plugin-flashhead`) loads the model the way the server does, once per variant, and times real chunks: 0.96 s of speech in, 24 frames out. Variants: the three Video memory presets `full`, `lean`, `smallest` (the default run), `eager`, `compiled`, `sdpa`, `autotune`, and the pieces `res384`, `int8`, `int4`, `vae8`, `decode25`. `--face` and `--audio` give a picture and a recording for a strip of frames per variant (quality is for eyes, not timers); `--long 300` lets her run on for 5 minutes and reports whether her face drifts. Every variant reports the video memory it took. Results land in `user/models/flashhead/bench/`. It never downloads; run the server once first.
 
-RTX 5090, 0.8.0: compiled 5.1x real time (0.19 s per chunk), uncompiled 4.0x. Experiments on the same card: `fp16acc` 6.2x and `decode25` 5.5x, both holding her face for 3 minutes; `steps2` 6.9x but her face smears while she talks.
+RTX 5090, 1.5.0: Full 6.7x real time (0.14 s per chunk) holding 6.1 GB, Lean 8.1x and 3.65 GB, Smallest 8.3x and 2.97 GB, all holding her face for 5 minutes. Tried and dead: 256 px melts to a grey mask within 3 minutes, 2 or 3 sampling steps smear while she talks, CUDA graphs drift.
 
 ## How it flows
 
@@ -89,7 +89,8 @@ her streamed voice ─tts_chunk_audio─► server.py (own conda env, GPU)
 ```
 
 - **Watch** in the sidebar or the Chat flyout's FlashHead page. Collapsing or leaving stops it. **⚙** opens her settings.
-- **Settings › FlashHead**: what she does between her words, her screens, whose face (empty = the persona of the chat she speaks in), a **Faces** tab (upload a face, back to her avatar, moods) and **Advanced** (port, the models folder and where it is now, the no-GPU install test).
+- **Settings › FlashHead**: **Video memory** (below), what she does between her words, her screens, whose face (empty = the persona of the chat she speaks in), a **Faces** tab (upload a face, back to her avatar, moods) and **Advanced** (port, the models folder and where it is now, the no-GPU install test).
+- **Video memory**: how much of the GPU her face takes. *Full* (512 px, 16-bit weights, about 6 GB) is her sharpest. *Lean* (384 px, 8-bit weights, about 4 GB) is a touch softer, half the memory, and faster. *Smallest* (384 px, 4-bit weights, about 3 GB) fits a card with 4 GB free. The leaner presets shrink the same models on the CPU as they load (nothing downloads again, and the shrink takes seconds; the first start of a leaner preset compiles for a minute or two, later starts are as quick as Full). Every start measures this card: the panel shows the speed and GB after "ready", and the line under the setting shows what each preset you have tried took and ran at here, so you can compare before you choose. fp16 sums and a bf16 audio encoder are on in every preset (free speed, measured safe; an overflow falls back to bf16 on its own).
 - **Between her words**: *Calm loop* (default) renders a few seconds of silence once per face, keeps the stretch closest to her real face, and replays it forward then back: the GPU works only while she talks. *Live* renders her as she sits, never repeating, and her next words flow on from there; the GPU works whenever someone watches.
 - Her voice is taken from this computer only on a lane that plays here and while a viewer plays sound. A board's voice is never taken; its face mouths along. If rendering keeps failing, the panel says so and her voice plays as usual.
 - **Her screens** (setting): Sapphire ESP32 satellites with a screen (the Waveshare board on satellite firmware 0.7.7+) show her face while she talks, or always. A board stays a speaker first.
