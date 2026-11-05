@@ -2,13 +2,16 @@
 // The stream is packets of (header, PCM, JPEG frames) for the same 0.96 s;
 // each is decoded whole, then its voice and frames are placed together on
 // WebAudio's clock, read where the ear is: the mouth can't drift from the voice.
+// While she speaks a ■ sits on her face: a tap stops her, here at once, at the
+// server (the rest of the reply) and at its source (the pump, by stream id).
 export const BASE = '/api/plugin/flashhead';
 export const csrf = () => document.querySelector('meta[name="csrf-token"]')?.content || '';
 
-function createPlayer(canvas) {
+function createPlayer(canvas, onTalk) {
     const g = canvas.getContext('2d');
     let ctx = null, abort = null, raf = 0, next = 0, frames = [], sources = [], gen = 0;
     let chain = Promise.resolve(), voiced = false, voiceEnd = 0, lastRaf = 0, clock = 0;
+    let talkEnd = 0, talking = false, sid = '';     // her words being heard (voiced or mouthed here), and whose stream
     const fresh = () => ({ packets: 0, gaps: 0, gap_s: 0, wait: 0, wait_max: 0, late: 0, stalls: 0, paused: 0 });
     let st = fresh();                   // this reply's numbers: one line in her server log when she goes quiet
 
@@ -31,6 +34,7 @@ function createPlayer(canvas) {
         if (voiced && lastRaf && ms - lastRaf > 250 && ms - lastRaf < 5000) st.stalls++;   // the page froze mid-reply
         lastRaf = ms;
         const now = heard();
+        if ((now < talkEnd) !== talking) onTalk(talking = now < talkEnd);
         let show = null;
         while (frames.length && frames[0].t <= now) {
             if (show) { show.bmp.close(); if (now - show.t > 0.1) st.late++; }    // never shown: its moment passed
@@ -62,6 +66,7 @@ function createPlayer(canvas) {
         frames = frames.filter(f => (f.t <= now) || (f.bmp.close(), false));
         next = 0;
         voiced = false;
+        talkEnd = 0;
     }
 
     // A packet's frames are decoded BEFORE its voice is scheduled, and both
@@ -100,6 +105,7 @@ function createPlayer(canvas) {
             src.onended = () => { sources = sources.filter(s => s !== src); };
         } else voiced = false;
         next = t + dur;
+        if (head.kind === 'speech') { talkEnd = t + dur; sid = head.sid || ''; }
         bmps.forEach((bmp, i) => bmp && frames.push({ t: t + i / head.fps, bmp }));
     }
 
@@ -139,6 +145,8 @@ function createPlayer(canvas) {
         gen++;                              // a packet still decoding never lands in the next Watch
         abort?.abort();
         cancelAnimationFrame(raf);
+        talkEnd = 0;
+        if (talking) onTalk(talking = false);
         frames.forEach(f => f.bmp.close());
         frames = [];
         sources = [];
@@ -146,7 +154,17 @@ function createPlayer(canvas) {
         ctx = null;
     }
 
-    return { start, stop };
+    // Her face was tapped: her voice stops here now, then at the server (the rest of
+    // the reply, every viewer) and at its source (that pump, so the next sentence
+    // never starts her again). After a turn has ended only the server's cut is left.
+    function hush() {
+        const id = sid;
+        flush();
+        fetch(`${BASE}/stop`, { method: 'POST', headers: { 'X-CSRF-Token': csrf() } }).catch(() => {});
+        import('/static/audio.js').then(a => { a.stop(true); if (id) a.stopLocalTts(id); }).catch(() => {});
+    }
+
+    return { start, stop, hush };
 }
 
 // Her settings tab (web/index.js): from Settings already, switch tabs; else enter Settings on it.
@@ -211,6 +229,7 @@ export function mount(root, { big = false } = {}) {
             <div style="position:relative;width:${size};aspect-ratio:1;background:#000;border-radius:var(--radius-md,8px);overflow:hidden;">
                 <img class="fh-still" style="position:absolute;inset:0;width:100%;height:100%;object-fit:cover;opacity:.5;">
                 <canvas class="fh-canvas" width="512" height="512" style="position:absolute;inset:0;width:100%;height:100%;"></canvas>
+                <div class="fh-hush" hidden style="position:absolute;top:6%;right:6%;width:1.6em;height:1.6em;border-radius:4px;background:rgba(0,0,0,.55);color:#fff;font-size:${big ? '20px' : '12px'};line-height:1.6em;text-align:center;pointer-events:none;">■</div>
             </div>
             <div style="display:flex;gap:6px;flex-wrap:wrap;justify-content:center;">
                 <button class="fh-watch btn">▶ Watch</button>
@@ -227,8 +246,16 @@ export function mount(root, { big = false } = {}) {
         </div>`;
     const $ = s => root.querySelector(s);
     const canvas = $('.fh-canvas'), still = $('.fh-still'), btn = $('.fh-watch'), status = $('.fh-status');
-    const player = createPlayer(canvas);
-    let watching = false, poll = 0, faceKey = '';
+    let watching = false, poll = 0, faceKey = '', line = '', talking = false;
+    const show = () => { status.textContent = talking ? 'speaking · tap her face to stop her' : line; };
+    const player = createPlayer(canvas, t => {           // her words start, or end, being heard here
+        talking = t;
+        $('.fh-hush').hidden = !t;
+        canvas.style.cursor = t ? 'pointer' : '';
+        canvas.title = t ? 'Tap her face to stop her' : '';
+        show();
+    });
+    canvas.onclick = () => { if (talking) player.hush(); };
 
     async function tick() {
         if (document.hidden || !root.isConnected || !canvas.offsetParent) return;   // nobody sees it: no polling
@@ -237,24 +264,25 @@ export function mount(root, { big = false } = {}) {
             const mood = s.mood ? ` · mood: ${s.mood}` : '';
             const stuck = ['error', 'unsupported', 'offline'].includes(s.status);
             $('.fh-retry').hidden = !stuck;
-            status.textContent = stuck ? (s.error || s.status)       // the reason, in words, alone
+            line = stuck ? (s.error || s.status)       // the reason, in words, alone
                 : !s.face_source ? 'No face yet: give her persona an avatar, or upload one in ⚙ › Faces'
                 : s.note || s.warning
                 || `${s.status} · face: ${s.face_source}${mood} · viewers: ${s.viewers ?? 0}`
                    + (s.gpu?.speed ? ` · ${s.gpu.speed}x real time, ${s.gpu.took_gb} GB` : '');
+            show();
             const key = `${s.face_source}|${s.mood}|${s.face_changed || ''}`;
             if (key !== faceKey) {                     // a face changed in Settings: the still follows
                 faceKey = key;
                 still.src = `${BASE}/face?t=${Date.now()}`;
             }
-        } catch { status.textContent = 'status unavailable'; }
+        } catch { line = 'status unavailable'; show(); }
     }
     tick();
     poll = setInterval(tick, 3000);
 
     async function watch() {
         watching = true;
-        btn.textContent = '■ Stop';
+        btn.textContent = '■ Stop watching';
         still.style.opacity = '0';
         try { await player.start(); }
         catch (e) { if (e.name !== 'AbortError') status.textContent = `stream error: ${e.message}`; }

@@ -23,17 +23,24 @@ on 127.0.0.1 with no key. The same calls serve both:
   POST /face?idle=      {"path": image} (local only) or the image itself
                         (Content-Type image/*) - animate this face; idle=loop|live
   POST /speak?take=1    raw audio (any format PyAV reads), mouthed while anyone watches;
-                        {"taken": true} only when asked to take it and a viewer plays sound;
-                        not taken, the face mouths it in silence (it plays elsewhere)
+       &device=        {"taken": true} only when asked to take it and a browser or a call plays
+                        sound (a board stream is not a listener); not taken, browsers get it
+                        with its audio zeroed (it plays elsewhere). device= names the board
+                        whose own reply it is: its stream carries the voice whole and that
+                        board plays it; every other face mouths it (2026-11-03). sid= core's
+                        stream id, carried in each packet's header: a tap on her face names it
   POST /viewer          a browser's numbers for the reply it played (JSON): one log line
-  POST /flush           she was stopped: drop what is queued
+  POST /flush?by=       she was stopped: drop what is queued (by=viewer: a tap on her face, logged)
   POST /end             her reply is over: its last words go out now (until then a
                         gap in her words holds the face, it never idles mid-reply)
   GET  /stream?audio=0  packets: >I header length, JSON header, s16 PCM, JPEG frames;
                         audio=0 = a viewer that shows frames only (her screens); of the
                         others the newest plays her voice, the rest get packets without it;
                         call=1 = her webcam carrying her voice into a call: it keeps her
-                        voice while it watches, a browser opened meanwhile mouths silently
+                        voice while it watches, a browser opened meanwhile mouths silently;
+                        board=1 = a board stream (screens.py): the whole packet always, never
+                        the voice tab; a speech head carries {"mute", "device", "taken"} and
+                        the board plays the voice only when device is its own and nobody took it
 """
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import contextlib
@@ -132,9 +139,10 @@ class Session:
         self.dq = None              # her last seconds of audio: the model's window
         self.mode = None            # idle "loop" | "live" as her Sapphire asked; None: this computer's setting
         self.speech = queue.Queue()
-        self.pending = {"a16": np.zeros(0, np.float32), "a24": np.zeros(0, np.int16)}
+        self.pending = {"a16": np.zeros(0, np.float32), "a24": np.zeros(0, np.int16), "tag": None}
         self.lock = threading.Lock()
         self.viewers = {}           # queue -> plays the sound (a browser) or frames only (a board)
+        self.boards = set()         # viewers that are board streams (?board=1): the whole packet always, never s.voice; the board routes her voice by "device"
         self.voice = None           # the one viewer that plays her voice (the newest browser): two would echo
         self.call = None            # her webcam's viewer with her voice: it keeps s.voice while it watches
         self.idle = {"key": None, "packets": [], "at": 0}
@@ -624,32 +632,37 @@ def _decode(data):
     return outs[P["sr"]].astype(np.float32), outs[PLAY_SR].astype(np.int16)
 
 
-def _queue_speech(s, data, mute=False):
+def _queue_speech(s, data, mute=False, device="", taken=False, sid=""):
     a16, a24 = _decode(data)
-    if mute:                                 # a device or her speakers play it: the face only mouths it
-        a24 = np.zeros_like(a24)
+    # mute: a device or her speakers play it, so browsers only mouth it (they get the packet with its
+    # audio zeroed, as before). A board stream gets it whole, with the tag: the board named plays it,
+    # the others mouth it (2026-11-03: a pendant's own replies were silent, its voice zeroed here and
+    # core's own sentence skipped for the stream).
+    tag = {"mute": bool(mute), "device": device or "", "taken": bool(taken),   # taken: a browser or a call plays it, so a board mouths it
+           "sid": sid or ""}                                                   # sid: core's stream, so a tap on her face can stop it at the source
     with s.lock:
         p16 = np.concatenate((s.pending["a16"], a16))
         p24 = np.concatenate((s.pending["a24"], a24))
         while len(p16) >= P["n16"]:
-            s.speech.put((p16[:P["n16"]], p24[:P["n24"]]))
+            s.speech.put((p16[:P["n16"]], p24[:P["n24"]], tag))
             p16, p24 = p16[P["n16"]:], p24[P["n24"]:]
-        s.pending.update(a16=p16, a24=p24)
+        s.pending.update(a16=p16, a24=p24, tag=tag)
 
 
 def _next_chunk(s):
     """Speech if any is waiting (flushing a partial tail), else silence."""
     try:
-        a16, a24 = s.speech.get_nowait()
-        return "speech", a16, a24
+        a16, a24, tag = s.speech.get_nowait()
+        return "speech", a16, a24, tag
     except queue.Empty:
         pass
     with s.lock:
         if len(s.pending["a16"]):
             a16, a24 = _fit(s.pending["a16"], P["n16"]), _fit(s.pending["a24"], P["n24"])
+            tag = s.pending["tag"]
             s.pending.update(a16=np.zeros(0, np.float32), a24=np.zeros(0, np.int16))
-            return "speech", a16, a24
-    return "idle", np.zeros(P["n16"], np.float32), None
+            return "speech", a16, a24, tag
+    return "idle", np.zeros(P["n16"], np.float32), None, None
 
 
 def _fit(a, n):
@@ -669,10 +682,11 @@ def _pack(kind, frames, a24):
     return _packet(kind, [_jpeg(f) for f in frames], a24)
 
 
-def _packet(kind, jpegs, a24):
+def _packet(kind, jpegs, a24, tag=None):
     audio = a24.tobytes() if a24 is not None else b""
     head = json.dumps({"kind": kind, "fps": P["fps"], "sr": PLAY_SR, "audio": len(audio),
-                       "frames": [len(j) for j in jpegs]}).encode()
+                       "frames": [len(j) for j in jpegs],
+                       **({"mute": tag["mute"], "device": tag["device"], "taken": tag["taken"], "sid": tag.get("sid", "")} if tag else {})}).encode()
     return struct.pack(">I", len(head)) + head + audio + b"".join(jpegs)
 
 
@@ -698,14 +712,22 @@ def _flush(s):
         _broadcast(s, struct.pack(">I", len(head)) + head)
 
 
-def _broadcast(s, pkt, quiet=None):
+def _broadcast(s, pkt, quiet=None, hush=None):
     """To every viewer of the session. One that fell behind loses its oldest
     packet, never the newest, so it stays near now and a stop always lands.
     `quiet`: the same without her voice, for every viewer but s.voice (b"":
-    nothing for them), so a second tab or window never plays her a beat apart."""
+    nothing for them), so a second tab or window never plays her a beat apart.
+    `hush`: the same with her voice zeroed, for s.voice when a device or her own
+    speakers play it. A board stream (s.boards) always gets `pkt`, whole: the
+    board named in its head plays the voice, the others mouth it."""
     with _viewers_lock:
         for q in s.viewers:
-            p = pkt if quiet is None or s.voice in (None, q) else quiet
+            if q in s.boards:
+                p = pkt
+            elif quiet is None or s.voice in (None, q):
+                p = hush if hush is not None else pkt
+            else:
+                p = quiet
             if not p:
                 continue
             try:
@@ -723,20 +745,22 @@ _out = queue.Queue(maxsize=2)    # rendered chunks waiting for their JPEGs: the 
 def _packer():
     """Frames to JPEGs and out, in order, beside the render loop."""
     while True:
-        s, gen, kind, frames, a24, pkt = _out.get()
-        quiet = None
+        s, gen, kind, frames, a24, pkt, tag = _out.get()
+        quiet = hush = None
         try:
             if pkt is None:
                 jpegs = [_jpeg(f) for f in frames]
-                pkt = _packet(kind, jpegs, a24)
+                pkt = _packet(kind, jpegs, a24, tag)
                 if a24 is not None:
-                    quiet = _packet(kind, jpegs, None) if jpegs else b""
+                    quiet = _packet(kind, jpegs, None, tag) if jpegs else b""
+                    if tag and tag["mute"]:
+                        hush = _packet(kind, jpegs, np.zeros_like(a24), tag)
         except Exception:
             logger.exception("Packing failed")
             continue
         with s.lock:
             if gen == s.gen:                     # not stopped since it was rendered
-                _broadcast(s, pkt, quiet)
+                _broadcast(s, pkt, quiet, hush)
 
 
 def _pick():
@@ -799,13 +823,13 @@ def _turn():
         logger.exception(f"Face not taken ({s.name})")
         s.want = None                       # never retried in a loop; her next reply sends it again
         with s.lock:                        # words taken while the face was coming still play, without one
-            for _, rest in _drain(s):
-                _out.put((s, s.gen, "speech", [], rest, None))
+            for _, rest, tag in _drain(s):
+                _out.put((s, s.gen, "speech", [], rest, None, tag))
         return
     if not s.face:                          # never animate the grey warm-up card
         time.sleep(0.05)
         return
-    kind, a16, a24 = _next_chunk(s)
+    kind, a16, a24, tag = _next_chunk(s)
     gen, t = s.gen, time.perf_counter()
     try:
         pkt = None
@@ -834,19 +858,19 @@ def _turn():
     except Exception as e:
         logger.exception(f"Render failed ({s.name})")
         if a24 is not None:
-            _out.put((s, gen, kind, [], a24, None))   # her words still reach whoever took them, without a face
+            _out.put((s, gen, kind, [], a24, None, tag))   # her words still reach whoever took them, without a face
         s.fails += 1
         _failing[0] += 1
         if s.fails >= 3:                    # this face won't render: her voice goes back to her own computer
             s.fails, s.want = 0, None
-            for _, rest in _drain(s):
-                _out.put((s, s.gen, "speech", [], rest, None))
+            for _, rest, tag in _drain(s):
+                _out.put((s, s.gen, "speech", [], rest, None, tag))
         if _failing[0] >= 6:                # every face fails: the GPU is in trouble, say so
             _state.update(status="error", error=f"Rendering keeps failing ({e}). Her voice plays as usual; Retry starts the face again.")
         time.sleep(1)
         return
     s.fails = _failing[0] = 0
-    _out.put((s, gen, kind, frames, a24, pkt))
+    _out.put((s, gen, kind, frames, a24, pkt, tag))
     c = s.clock                             # a viewer leaving may clear it meanwhile
     if c:
         c[1] += P["chunk_s"]
@@ -956,9 +980,11 @@ class Handler(BaseHTTPRequestHandler):
         args = parse_qs(url.query)
         with _viewers_lock:
             s.viewers[q] = args.get("audio", ["1"])[0] != "0"
+            if args.get("board", ["0"])[0] == "1":
+                s.boards.add(q)                  # a board stream: the whole packet always, never the voice tab
             if s.viewers[q] and args.get("call", ["0"])[0] == "1":
                 s.call = s.voice = q             # a call hears her: a browser opened mid-call never takes her voice from it
-            elif s.viewers[q] and s.call is None:
+            elif s.viewers[q] and s.call is None and q not in s.boards:
                 s.voice = q                      # the newest browser plays her voice; any other mouths it silently
             _watching.set()
         try:                                     # what the browser says its audio path adds (Bluetooth: 0.15-0.3 s)
@@ -990,10 +1016,11 @@ class Handler(BaseHTTPRequestHandler):
         finally:
             with _viewers_lock:
                 s.viewers.pop(q, None)
+                s.boards.discard(q)
                 if s.call is q:
                     s.call = None
                 if s.voice is q:
-                    s.voice = next((v for v, sound in s.viewers.items() if sound), None)
+                    s.voice = next((v for v, sound in s.viewers.items() if sound and v not in s.boards), None)
                 last = not s.viewers
                 if last:
                     s.clock = None
@@ -1038,6 +1065,8 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"error": str(e)}, 400)
         if url.path == "/flush":
             _flush(s)
+            if query.get("by"):                  # a tap on her face, not core's own stop: said beside the run's line
+                logger.info(f"Stopped from the {query['by'][0][:24]} ({s.name})")
             return self._json({"ok": True})
         if url.path == "/viewer":
             _viewer_log(s, data)
@@ -1056,8 +1085,9 @@ class Handler(BaseHTTPRequestHandler):
                 return self._json({"taken": False, "why": why})
             try:
                 take = query.get("take", ["0"])[0] == "1"
-                taken = take and any(s.viewers.values())
-                _queue_speech(s, data, mute=not taken)   # played elsewhere: a viewer playing it too was a late echo
+                taken = take and any(sound for v, sound in s.viewers.items() if v not in s.boards)   # a browser or a call plays it; a board stream is not a listener here (it mouths what others play)
+                _queue_speech(s, data, mute=not taken, device=query.get("device", [""])[0], taken=taken,   # played elsewhere: a viewer playing it too was a late echo; a board stream still carries it to the device named
+                              sid=query.get("sid", [""])[0][:64])
                 s.open, s.heard = True, time.monotonic()
                 return self._json({"taken": taken, "why": "" if taken else "no listener" if take else "a device plays it"})
             except Exception as e:

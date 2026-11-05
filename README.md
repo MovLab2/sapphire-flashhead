@@ -88,14 +88,15 @@ her streamed voice ─tts_chunk_audio─► server.py (own conda env, GPU)
    her boards        ◄── screens.py (frames only) ── /screen/picture?format=jpeg
 ```
 
-- **Watch** in the sidebar or the Chat flyout's FlashHead page. Collapsing or leaving stops it. **⚙** opens her settings.
+- **Watch** in the sidebar or the Chat flyout's FlashHead page. Collapsing or leaving stops it (**■ Stop watching**). **⚙** opens her settings.
+- While she speaks a **■** sits on her face and the line under it says so: **tap her face and she stops**, at once, here and everywhere her words were going. The rest of that reply is dropped and the LLM keeps writing. The chat's own ⏹ does the same while her turn runs, but the face server holds the rest of a reply after the turn has ended, and only a tap reaches that.
 - **Settings › FlashHead**: **Video memory** (below), what she does between her words, her screens, whose face (empty = the persona of the chat she speaks in), a **Faces** tab (upload a face, back to her avatar, moods) and **Advanced** (port, the models folder and where it is now, the no-GPU install test).
 - **Video memory**: how much of the GPU her face takes. *Full* (512 px, 16-bit weights, about 6 GB) is her sharpest. *Lean* (384 px, 8-bit weights, about 4 GB) is a touch softer, half the memory, and faster. *Smallest* (384 px, 4-bit weights, about 3 GB) fits a card with 4 GB free. The leaner presets shrink the same models on the CPU as they load (nothing downloads again, and the shrink takes seconds; the first start of a leaner preset compiles for a minute or two, later starts are as quick as Full). Every start measures this card: the panel shows the speed and GB after "ready", and the line under the setting shows what each preset you have tried took and ran at here, so you can compare before you choose. fp16 sums and a bf16 audio encoder are on in every preset (free speed, measured safe; an overflow falls back to bf16 on its own).
 - **Between her words**: *Calm loop* (default) renders a few seconds of silence once per face, keeps the stretch closest to her real face, and replays it forward then back: the GPU works only while she talks. *Live* renders her as she sits, never repeating, and her next words flow on from there; the GPU works whenever someone watches.
 - Her voice is taken from this computer only on a lane that plays here and while a viewer plays sound. A board's voice is never taken; its face mouths along. If rendering keeps failing, the panel says so and her voice plays as usual.
 - **Her screens** (setting): Sapphire ESP32 satellites with a screen (the Waveshare board on satellite firmware 0.7.7+) show her face while she talks, or always. A board stays a speaker first.
 - **Moods**: `user/flashhead/moods/<emotion>.png`, matched to her active emotion pieces at the start of each reply. Add them with **+ Mood** on the Faces tab.
-- **Stop** flushes the face with her voice.
+- **Stop** (the chat's ⏹, a board's button, a tap on her face) flushes the face with her voice.
 - The service listens on 127.0.0.1, answers Sapphire's own calls only, and animates faces only from inside Sapphire's folder. With sharing on it also opens the TLS door above; nothing comes in through it without a key. Faces other computers send are kept in `user/models/flashhead/faces/` (copies, never backed up).
 
 ## What gets fetched, and their licenses

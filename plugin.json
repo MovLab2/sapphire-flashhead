@@ -1,7 +1,7 @@
 {
   "name": "flashhead",
   "short_display_name": "Avatar FlashHead",
-  "version": "1.5.0",
+  "version": "1.6.0",
   "min_core_version": "2.15.3",
   "description": "Live talking face \u2014 SoulX-FlashHead lip-syncs her persona avatar to her streaming voice, on the GPU in its own conda env",
   "author": "Teri and Chris",
@@ -112,6 +112,11 @@
         "method": "POST",
         "path": "viewer",
         "handler": "routes/api.py:viewer"
+      },
+      {
+        "method": "POST",
+        "path": "stop",
+        "handler": "routes/api.py:stop"
       },
       {
         "method": "GET",

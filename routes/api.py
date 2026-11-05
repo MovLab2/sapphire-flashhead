@@ -78,6 +78,20 @@ async def viewer(request=None, settings=None, **_):
     return {"ok": True}
 
 
+async def stop(settings=None, **_):
+    """Someone tapped her face: the server drops the rest of her reply, and its flush
+    packet cuts what every viewer scheduled, at once. The browser stops the source
+    itself (/api/tts/stop with the stream id each packet carries), or the next
+    sentence would start her again; after a turn has ended only this reaches her."""
+    try:
+        kw = await asyncio.to_thread(faces.httpx_kwargs, settings)
+        async with httpx.AsyncClient(timeout=2, **kw) as c:
+            await c.post(f"{faces.base_url(settings)}/flush?by=viewer")
+    except Exception as e:
+        return {"error": f"not stopped: {faces.unreachable(e)}"}, 503
+    return {"ok": True}
+
+
 def get_face(settings=None, query=None, **_):
     """The base face, or ?mood=<name> for a mood thumbnail."""
     from fastapi.responses import FileResponse, JSONResponse

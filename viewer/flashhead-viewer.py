@@ -10,6 +10,7 @@ is, so the mouth can't drift from the voice (web/player.js, in Python).
     python flashhead-viewer.py --host 192.168.1.50 --key <API key> [--fullscreen] [--mute]
 
 The key: Sapphire's Settings > System > API Keys. Esc or Q quits, F toggles fullscreen.
+A click on her face (or Space) while she speaks stops her: here, at the server, at its source.
 """
 import argparse
 import hashlib
@@ -208,6 +209,8 @@ class Player(QObject):
         self.frames = deque()               # (t, QImage) waiting for their moment
         self.next = 0.0
         self.side = 512                     # the face's size on screen, frames are scaled to it here
+        self.talk_end = 0.0                 # until when her words are heard, and the stream they are (a click stops it)
+        self.sid = ""
 
     def run(self):
         delay = 2
@@ -266,10 +269,13 @@ class Player(QObject):
                 pcm = np.interp(np.arange(0, len(pcm), head["sr"] / SR), np.arange(len(pcm)), pcm).astype(np.int16)
             self.clock.play(t, pcm)
         self.next = t + dur
+        if head.get("kind") == "speech":
+            self.talk_end, self.sid = t + dur, head.get("sid") or ""
         with self.lock:
             self.frames.extend((t + i / fps, img) for i, img in enumerate(imgs))
 
     def flush(self):                        # she was stopped: cut what's scheduled
+        self.talk_end = 0.0
         self.clock.flush()
         now = self.clock.heard()
         with self.lock:
@@ -284,6 +290,28 @@ class Player(QObject):
                 show = self.frames.popleft()[1]
         return show
 
+    def talking(self):
+        return self.clock.heard() < self.talk_end
+
+    def hush(self):
+        """Her face was clicked: her voice stops here now, then at the server (the rest of
+        the reply, every viewer) and at its source (that pump, by the stream id each packet
+        carries, so the next sentence never starts her again). After a turn has ended only
+        the server's cut is left."""
+        sid, http = self.sid, self.http
+        self.flush()
+        if not http:
+            return
+
+        def go():
+            try:
+                http.post(f"{self.base}/stop", timeout=3)
+                if sid:
+                    http.post(f"{self.origin}/api/tts/stop", json={"stream_id": sid}, timeout=3)
+            except Exception:
+                pass
+        threading.Thread(target=go, daemon=True).start()
+
 
 class Face(QWidget):
     def __init__(self, player, fullscreen):
@@ -291,6 +319,7 @@ class Face(QWidget):
         self.player = player
         self.image = None
         self.still = None
+        self.talk = False
         self.status = "connecting..."
         self.setWindowTitle("FlashHead")
         self.resize(640, 640)
@@ -317,8 +346,11 @@ class Face(QWidget):
 
     def tick(self):
         img = self.player.due()
+        talk = self.player.talking()
         if img is not None:
             self.image = img
+        if img is not None or talk != self.talk:
+            self.talk = talk
             self.update()
 
     def resizeEvent(self, e):
@@ -335,6 +367,8 @@ class Face(QWidget):
             g.setOpacity(1.0 if self.image is not None else 0.5)
             g.drawImage(box, img)
             g.setOpacity(1.0)
+        if self.talk:                       # a click on her face stops her
+            g.fillRect(QRect(box.right() - side // 12, box.top() + side // 24, side // 24, side // 24), QColor(255, 255, 255, 210))
         if self.status:
             g.setPen(QColor(200, 200, 200))
             g.setFont(QFont("sans", max(10, side // 40)))
@@ -346,6 +380,12 @@ class Face(QWidget):
             self.close()
         elif e.key() in (Qt.Key_F, Qt.Key_F11):
             self.full(not self.isFullScreen())
+        elif e.key() == Qt.Key_Space and self.player.talking():
+            self.player.hush()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.LeftButton and self.player.talking():
+            self.player.hush()
 
     def mouseDoubleClickEvent(self, e):
         self.full(not self.isFullScreen())

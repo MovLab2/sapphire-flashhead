@@ -40,7 +40,7 @@ venv/bin/python flashhead-viewer.py --host 192.168.1.50 --key <API key> --fullsc
 
 `FLASHHEAD_HOST`, `FLASHHEAD_KEY` and `FLASHHEAD_DEVICE` work in place of the options. The key in an environment variable stays out of `ps`.
 
-Keys: **F** or double-click toggles fullscreen, **Esc** or **Q** quits.
+Keys: **F** or double-click toggles fullscreen, **Esc** or **Q** quits. A click on her face (or **Space**) while she speaks stops her: here, at the server and at its source.
 
 ## Her voice
 

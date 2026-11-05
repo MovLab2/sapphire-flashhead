@@ -4,8 +4,10 @@ stream start: pick the face for her current mood and wake her screens. Each
 chunk: handed to the server so the face mouths it; the audio is taken (not
 played here) only on a lane that plays here and while a viewer plays sound,
 so a closed panel never mutes her and a board's voice is never stolen.
-Stop: flush what's queued so the face stops when she does; a reply that
-ends tells the server so (/end), so a gap between her sentences holds the face
+Stop: flush what's queued so the face stops when she does (a tap on her face in a
+viewer flushes the server itself and stops the pump by the stream id each packet
+carries: routes/api.py stop); a reply that ends tells the server so (/end), so a
+gap between her sentences holds the face
 instead of idling it. One line per reply says where her words went.
 Only while the server was last seen ready: a stopped or loading service costs
 her voice nothing (looked at again at most every 10 s). The server is this
@@ -15,6 +17,7 @@ import logging
 import time
 
 import requests
+from urllib.parse import quote
 
 from plugins.flashhead import faces
 
@@ -48,6 +51,11 @@ def tts_stream_start(event):
     try:
         from plugins.flashhead import screens
         screens.wake()
+        from core.devices import glass
+        device = (event.metadata or {}).get("device") or ""
+        for d, _ in glass.av_boards():
+            if device and d == device:           # a satellite's own reply: that board's stream carries its voice, so core's sentence to it is skipped from the first
+                glass.av_mark(d)
     except Exception as e:
         logger.debug(f"[flashhead] screens not woken: {e}")
     try:
@@ -69,9 +77,12 @@ def tts_chunk_audio(event):
         _tally.clear()
     t = _tally.setdefault(meta.get("stream_id"), {"face": 0, "here": {}, "slow": 0})
     here = meta.get("plays_here", True)      # False: it is a device's voice, never ours to take
+    device = meta.get("device") or ""        # whose: the server hands it whole to the board streams (the owner plays it) and hushed to browsers
     t0 = time.monotonic()
     try:
-        r = _post(f"/speak?take={int(here)}", data=data, headers={"Content-Type": audio.get("content_type", "audio/ogg")})
+        sid = quote(str(meta.get("stream_id") or ""))   # core's stream: a tap on her face stops it at the source (/api/tts/stop)
+        r = _post(f"/speak?take={int(here)}&device={quote(device)}&sid={sid}", data=data,
+                  headers={"Content-Type": audio.get("content_type", "audio/ogg")})
         ans = r.json() if r.ok else {"why": f"HTTP {r.status_code}"}
         event.skip_tts = bool(here and ans.get("taken"))
         why = "" if event.skip_tts else ans.get("why") or "refused"
